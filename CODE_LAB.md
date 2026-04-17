@@ -107,10 +107,10 @@ python app.py
 
 | Feature | Basic | Advanced | Tại sao quan trọng? |
 |---------|-------|----------|---------------------|
-| Config | Hardcode | Env vars | ... |
-| Health check |  |  | ... |
-| Logging | print() | JSON | ... |
-| Shutdown | Đột ngột | Graceful | ... |
+| Config | Hardcode | Env vars | Manager secret key |
+| Health check | Không có | /health & /ready | Check status of server |
+| Logging | print() | JSON Structured | Easy to analyze logs |
+| Shutdown | Đột ngột | Graceful | Critical for production |
 
 ###  Checkpoint 1
 
@@ -143,10 +143,14 @@ cd ../../02-docker/develop
 
 **Nhiệm vụ:** Đọc `Dockerfile` và trả lời:
 
-1. Base image là gì?
-2. Working directory là gì?
-3. Tại sao COPY requirements.txt trước?
-4. CMD vs ENTRYPOINT khác nhau thế nào?
+1. Base image là gì? 
+- Base image là python:3.11. Đây là bản phân phối chuẩn của Python 3.11 trên Linux, chứa đầy đủ các công cụ để chạy ứng dụng Python.
+2. Working directory là gì? 
+- Working directory là /app. Đây là thư mục gốc cho ứng dụng bên trong container.
+3. Tại sao COPY requirements.txt trước? 
+- Để tận dụng Docker Layer Caching. Nếu requirements.txt không đổi, Docker sẽ bỏ qua bước cài đặt dependencies (pip install), giúp quá trình build nhanh hơn nhiều.
+4. CMD vs ENTRYPOINT khác nhau thế nào? 
+- CMD cung cấp lệnh mặc định và có thể bị ghi đè (override) dễ dàng khi chạy container. ENTRYPOINT thiết lập lệnh chính không thể bị ghi đè dễ dàng; các tham số truyền vào khi chạy container sẽ được cộng dồn vào sau lệnh này.
 
 ###  Exercise 2.2: Build và run
 
@@ -164,6 +168,7 @@ curl http://localhost:8000/ask -X POST \
 ```
 
 **Quan sát:** Image size là bao nhiêu?
+  - Kích thước 1.66 GB
 ```bash
 docker images my-agent:develop
 ```
@@ -175,9 +180,9 @@ cd ../production
 ```
 
 **Nhiệm vụ:** Đọc `Dockerfile` và tìm:
-- Stage 1 làm gì?
-- Stage 2 làm gì?
-- Tại sao image nhỏ hơn?
+- Stage 1 làm gì? Build enviroment
+- Stage 2 làm gì? Runtime 
+- Tại sao image nhỏ hơn? Các bộ mã nguồn của compiler (gcc) và file rác phát sinh khi cài đặt thư viện bị bỏ lại ở Stage 1, Sử dụng bản -slim: Bản Develop dùng python:3.11 (full), trong khi bản Production dùng python:3.11-slim, Docker chỉ lưu lại stage cuối cùng vào image, giúp loại bỏ toàn bộ các lớp (layers) trung gian không cần thiết.
 
 Build và so sánh:
 ```bash
@@ -189,9 +194,55 @@ docker images | grep my-agent
 
 **Nhiệm vụ:** Đọc `docker-compose.yml` và vẽ architecture diagram.
 
+```mermaid
+graph TD
+    %% Định nghĩa các tác nhân bên ngoài
+    User((User / Client))
+    
+    subgraph Public_Network [Internet / Public]
+        User -->|Port 80/443| Nginx
+    end
+
+    subgraph Docker_Internal_Network [Internal Network: 'internal']
+        direction TB
+        
+        %% Load Balancer
+        Nginx[Nginx Reverse Proxy]
+        
+        %% Application Layer
+        subgraph Agent_Cluster [Agent Service]
+            Agent1[Agent Replica 1]
+            Agent2[Agent Replica 2]
+        end
+        
+        %% Database / Cache Layer
+        Redis[(Redis Cache)]
+        Qdrant[(Qdrant Vector DB)]
+    end
+
+    %% Luồng dữ liệu nội bộ
+    Nginx -->|Load Balancing| Agent1
+    Nginx -->|Load Balancing| Agent2
+    
+    Agent1 & Agent2 -->|Session/Rate Limit| Redis
+    Agent1 & Agent2 -->|Vector Search/RAG| Qdrant
+
+    %% Volumes
+    subgraph Persistence [Persistent Storage]
+        Redis --- redis_vol[(redis_data)]
+        Qdrant --- qdrant_vol[(qdrant_data)]
+    end
+
+    %% Styles
+    style Nginx fill:#009639,color:#fff
+    style Agent1 fill:#2496ed,color:#fff
+    style Agent2 fill:#2496ed,color:#fff
+    style Redis fill:#d82c20,color:#fff
+    style Qdrant fill:#ff4b4b,color:#fff
 ```bash
 docker compose up
 ```
+
 
 Services nào được start? Chúng communicate thế nào?
 
@@ -338,9 +389,17 @@ cd ../../04-api-gateway/develop
 ```
 
 **Nhiệm vụ:** Đọc `app.py` và tìm:
-- API key được check ở đâu?
-- Điều gì xảy ra nếu sai key?
-- Làm sao rotate key?
+1. API key được check ở đâu?
+API key được kiểm tra tập trung tại hàm verify_api_key (dòng 39 - 54).
+Hàm này được tiêm vào endpoint /ask bằng cơ chế Depends(verify_api_key) của FastAPI (dòng 70). Nó sẽ tự động trích xuất giá trị từ Header có tên là X-API-Key để so sánh.
+2. Điều gì xảy ra nếu sai key?
+Hệ thống sẽ ném ra ngoại lệ HTTPException và trả về mã lỗi cho Client:
+
+Nếu thiếu Key (không gửi header): Trả về mã 401 Unauthorized kèm tin nhắn "Missing API key".
+Nếu sai Key: Trả về mã 403 Forbidden kèm tin nhắn "Invalid API key".
+3. Làm sao rotate key?
+Cơ chế: Biến API_KEY được lấy từ biến môi trường AGENT_API_KEY (os.getenv("AGENT_API_KEY")).
+Cách thực hiện: Bạn chỉ cần thay đổi giá trị của biến môi trường AGENT_API_KEY trên hệ thống (ví dụ: trong Dashboard của Railway hoặc trong file .env) và khởi động lại ứng dụng. Code sẽ tự động nhận diện Key mới mà không cần sửa lại mã nguồn (12-Factor App).
 
 Test:
 ```bash
@@ -387,9 +446,9 @@ curl http://localhost:8000/ask -X POST \
 ###  Exercise 4.3: Rate limiting
 
 **Nhiệm vụ:** Đọc `rate_limiter.py` và trả lời:
-- Algorithm nào được dùng? (Token bucket? Sliding window?)
-- Limit là bao nhiêu requests/minute?
-- Làm sao bypass limit cho admin?
+- Algorithm nào được dùng? (Token bucket? Sliding window?) Sliding window 
+- Limit là bao nhiêu requests/minute? rate_limiter_user = RateLimiter(max_requests=10, window_seconds=60)   # User: 10 req/phút
+- Làm sao bypass limit cho admin? rate_limiter_admin = RateLimiter(max_requests=100, window_seconds=60)  # Admin: 100 req/phút
 
 Test:
 ```bash
@@ -524,14 +583,28 @@ def ready():
 import signal
 import sys
 
+logger = logging.getLogger(__name__)
 def shutdown_handler(signum, frame):
-    """Handle SIGTERM from container orchestrator"""
-    # TODO:
-    # 1. Stop accepting new requests
-    # 2. Finish current requests
-    # 3. Close connections
-    # 4. Exit
-    pass
+    """Handle SIGTERM from container orchestrator (e.g., Railway, K8s)"""
+    logger.info("Received SIGTERM - Starting graceful shutdown...")
+    
+    # 1. Đánh dấu trạng thái đang tắt để stop nhận request mới (ví dụ: qua health check /ready)
+    global is_shutting_down
+    is_shutting_down = True
+    
+    # 2. Thông báo cho người dùng hoặc hệ thống giám sát
+    print("\n[SHUTDOWN] Finishing in-flight requests...")
+    # 3. Giả lập việc đợi các request đang chạy hoàn tất (ví dụ đợi 2-5 giây)
+    # Trong thực tế, Uvicorn sẽ tự động đợi các request hiện tại
+    time.sleep(5) 
+    # 4. Đóng các kết nối đến Database, Redis, v.v.
+    # examples:
+    redis_client.close()
+    db_connection.disconnect()
+    print("[SHUTDOWN] Connections closed safely.")
+    # 5. Thoát chương trình với mã thành công
+    print("[SHUTDOWN] Graceful shutdown complete. Bye!")
+    sys.exit(0)
 
 signal.signal(signal.SIGTERM, shutdown_handler)
 ```
@@ -582,6 +655,9 @@ def ask(user_id: str, question: str):
 
 Tại sao? Vì khi scale ra nhiều instances, mỗi instance có memory riêng.
 
+- Thay vì mỗi Agent tự giữ bí mật trong RAM của mình, chúng ta dùng một "nhà kho" chung là Redis:
+Dù Agent nào nhận request, nó cũng đều chạy ra "nhà kho" Redis để lấy dữ liệu.
+Điều này giúp Agent trở thành Stateless (phi trạng thái) — nghĩa là Agent không giữ gì cho riêng mình. Nhờ vậy, chúng ta có thể bật/tắt hàng trăm Agent cùng lúc mà không lo mất dữ liệu khách hàng.
 ###  Exercise 5.4: Load balancing
 
 **Nhiệm vụ:** Chạy stack với Nginx load balancer:

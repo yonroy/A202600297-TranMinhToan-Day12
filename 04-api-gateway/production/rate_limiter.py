@@ -85,3 +85,7 @@ class RateLimiter:
 # Singleton instances cho các tiers khác nhau
 rate_limiter_user = RateLimiter(max_requests=10, window_seconds=60)   # User: 10 req/phút
 rate_limiter_admin = RateLimiter(max_requests=100, window_seconds=60)  # Admin: 100 req/phút
+
+if __name__ == "__main__":
+    for i in range(0,20):
+        print(rate_limiter_user.check("user1"))
